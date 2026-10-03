@@ -1,0 +1,99 @@
+name: Docker Build & Validation
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  docker-build:
+    name: Docker Images & Compose Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: false
+          tags: task-manager-backend:validate
+
+      - name: Build frontend Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          build-args: |
+            VITE_API_URL=http://localhost:5000/api
+          push: false
+          tags: task-manager-frontend:validate
+
+      - name: Validate docker-compose configuration
+        env:
+          PORT: 5000
+          NODE_ENV: production
+          MONGODB_URI: mongodb+srv://ci-validation:ci-placeholder@cluster.mongodb.net/test?retryWrites=true&w=majority
+          CLIENT_URL: http://localhost:3000
+          JWT_SECRET: ci-validation-secret-at-least-32-characters-long
+          JWT_EXPIRES_IN: 7d
+          VITE_API_URL: http://localhost:5000/api
+        run: |
+          echo "=== 1. Validating docker-compose.yml syntax and configuration ==="
+          docker compose config --quiet
+          echo "docker-compose.yml syntax is valid."
+
+          echo "=== 2. Validating services defined in docker-compose.yml ==="
+          SERVICES=$(docker compose config --services)
+          echo "Discovered services:"
+          echo "$SERVICES"
+
+          if ! echo "$SERVICES" | grep -qx "backend"; then
+            echo "ERROR: 'backend' service missing from docker-compose.yml"
+            exit 1
+          fi
+
+          if ! echo "$SERVICES" | grep -qx "frontend"; then
+            echo "ERROR: 'frontend' service missing from docker-compose.yml"
+            exit 1
+          fi
+
+          if echo "$SERVICES" | grep -Eiq "mongo|database|postgres|redis"; then
+            echo "ERROR: Forbidden database service found in docker-compose.yml"
+            exit 1
+          fi
+
+          echo "=== 3. Inspecting resolved service configuration ==="
+          COMPOSE_CONFIG=$(docker compose config)
+
+          # Verify frontend depends on backend
+          echo "$COMPOSE_CONFIG" | grep -q "backend" || {
+            echo "ERROR: Frontend does not specify backend dependency"
+            exit 1
+          }
+
+          # Verify backend port 5000 is mapped
+          echo "$COMPOSE_CONFIG" | grep -q "5000:5000" || {
+            echo "ERROR: Backend port 5000 mapping missing"
+            exit 1
+          }
+
+          # Verify frontend port 3000:80 is mapped
+          echo "$COMPOSE_CONFIG" | grep -q "3000:80" || {
+            echo "ERROR: Frontend port 3000:80 mapping missing"
+            exit 1
+          }
+
+          echo "Docker images built and docker-compose configuration validated successfully."
